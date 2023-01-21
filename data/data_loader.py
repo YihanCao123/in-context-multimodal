@@ -14,7 +14,7 @@ class CocoDataset(Dataset):
                                          annFile=ann_path,
                                          transform=transform)
         self.tokenizer = BertTokenizerFast.from_pretrained('bert-base-uncased')
-        self.tokenizer.add_special_tokens(["[IMG]"])
+        self.tokenizer.add_special_tokens({"additional_special_tokens": ["[IMG]"]})
         self.vocab = self.tokenizer.get_vocab()
     
     def __getitem__(self, index):
@@ -42,7 +42,10 @@ class CocoDataset(Dataset):
         return token_ids, token_type_ids, attention_mask, caps
     
     def collate_fn(self, all_data):
-        image, caption = all_data
+        # all_data: [bs, Example(img(3*..*..), cap)]
+        image = torch.stack([example[0] for example in all_data])
+        caption = [example[1] for example in all_data]
+        # image, caption = all_data
         token_ids, token_type_ids, attention_mask, caption = self.pad_data(caption)
         return {
             'img': image,
@@ -53,10 +56,16 @@ class CocoDataset(Dataset):
 
 
 if __name__ == "__main__":
-    train_dataset = CocoDataset("val2017", "annotations/captions_val2017.json", transforms.PILToTensor())
+    common_trans = transforms.Compose([
+        transforms.Resize((224, 224)),
+        transforms.ToTensor(),
+        transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]) # normalization 
+    ])
+    train_dataset = CocoDataset("../val2017", "../annotations/captions_val2017.json", common_trans)
 
     train_dataloader = DataLoader(train_dataset, shuffle=True, batch_size=8, collate_fn=train_dataset.collate_fn)
-
+    # for data in list(enumerate(train_dataloader))[:1]:
+    #     print(data)
     
     
 
