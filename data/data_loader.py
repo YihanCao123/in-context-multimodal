@@ -1,9 +1,10 @@
 import torchvision.datasets as dset
 import torchvision.transforms as transforms
 
-from transformers import BertTokenizerFast
+from transformers import BertTokenizerFast, CLIPImageProcessor
 import copy
 import torch
+import torch.nn.functional as F
 from torch.utils.data import Dataset, DataLoader
 
 class CocoDataset(Dataset):
@@ -12,12 +13,14 @@ class CocoDataset(Dataset):
         self.p = args
         self.dataset = dset.CocoCaptions(root=img_root,
                                          annFile=ann_path,
-                                         transform=transform)
+                                         transform=transform
+                                        )
         self.context = dset.CocoCaptions(root=context_img_root,
                                          annFile=context_ann_path,
                                          transform=transform
-        )
+                                        )
         self.tokenizer = BertTokenizerFast.from_pretrained('bert-base-uncased')
+        self.clip_processor = CLIPImageProcessor()
         # self.tokenizer.add_special_tokens({"additional_special_tokens": ["[IMG]"]})
         self.vocab = self.tokenizer.get_vocab()
 
@@ -27,14 +30,15 @@ class CocoDataset(Dataset):
         """Generates in_context images, prompts and labels(captions) for every input.
         """
         image, captions = self.dataset[index]
+        
         target = captions[0]
         # caption = "[CLS] " + captions[0] + " [SEP]"
         in_context_images = copy.deepcopy(self.in_context_figs)
         in_context_images.append(image)
-        in_context_images_tensor = torch.stack(in_context_images)
+        in_context_figs = self.clip_processor.preprocess(in_context_images, return_tensors='pt')['pixel_values'] # shape: [n_shots+1, 3, 224, 224]
         in_context_prompts = copy.deepcopy(self.in_context_prompts)
 
-        inputs = {"images": in_context_images_tensor, "prompts": in_context_prompts}
+        inputs = {"images": in_context_figs, "prompts": in_context_prompts}
         return inputs, target
     
     def __len__(self):
@@ -78,31 +82,39 @@ class CocoDataset(Dataset):
         encoding = self.tokenizer(caps, return_tensors='pt', padding=True, truncation=True)
         token_ids = torch.LongTensor(encoding['input_ids'])
         attention_mask = torch.LongTensor(encoding['attention_mask'])
-        token_type_ids = torch.LongTensor(encoding['token_type_ids'])
+        # token_type_ids = torch.LongTensor(encoding['token_type_ids'])
 
-        return token_ids, token_type_ids, attention_mask, caps
+        return token_ids, attention_mask, caps
     
     def collate_fn(self, all_data):
         """ all_data: [bs, Example(
                 inputs{
                     "images": [n_shots images],
-                    "prompts": [n_shots prompts
-                        "token_ids":,
-                        "mask":,
-                        "type":
+                    "prompts": [n_shots prompts(
+                            "token_ids":,
+                            "mask":
+                        )
                     ]
                 },
                 targets(captions)
         )]
         """
         image = torch.stack([example[0]["images"] for example in all_data])
-        prompts = [example[0]["prompts"] for example in all_data]
+        prompts_input_ids = [example[0]["prompts"]['input_ids'] for example in all_data]
+        prompts_attention_mask = [example[0]["prompts"]['attention_mask'] for example in all_data]
+        max_seq_len = max([p.shape[1] for p in prompts_input_ids])
+        # reshape to max_seq_len
+        prompts_input_ids = torch.stack([F.pad(p_id, pad=(0,max_seq_len-p_id.shape[1],0,0)) for p_id in prompts_input_ids])
+        prompts_attention_mask = torch.stack([F.pad(p_mask, pad=(0,max_seq_len-p_mask.shape[1],0,0)) for p_mask in prompts_attention_mask])
         caption = [example[1] for example in all_data]
         # image, caption = all_data
-        token_ids, token_type_ids, attention_mask, caption = self.pad_data(caption)
+        token_ids, attention_mask, caption = self.pad_data(caption)
         return {
             'img': image,
-            'prompt': prompts,
+            'prompt': {
+                "input_ids": prompts_input_ids,
+                "attention_mask": prompts_attention_mask
+            },
             'cap': caption,
             'token_ids': token_ids,
             'attention_mask': attention_mask,
@@ -110,21 +122,20 @@ class CocoDataset(Dataset):
 
 
 if __name__ == "__main__":
-    common_trans = transforms.Compose([
-        transforms.Resize((224, 224)),
-        transforms.ToTensor(),
-        transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]) # normalization 
-    ])
-    train_dataset = CocoDataset("resources/val2017", 
-                                "resources/annotations/captions_val2017.json", 
+    # common_trans = transforms.Compose([
+    #     transforms.Resize((224, 224)),
+    #     transforms.ToTensor(),
+    #     transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]) # normalization 
+    # ])
+    common_trans = transforms.PILToTensor()
+    train_dataset = CocoDataset("resources/in_context", 
+                                "resources/annotations/in_context.json", 
                                 "resources/in_context", 
                                 "resources/annotations/in_context.json", 
-                                common_trans)
+                                )
 
-    train_dataloader = DataLoader(train_dataset, shuffle=True, batch_size=8, collate_fn=train_dataset.collate_fn)
+    train_dataloader = DataLoader(train_dataset, shuffle=True, batch_size=1, collate_fn=train_dataset.collate_fn)
     for data in list(enumerate(train_dataloader))[:1]:
         print(data)
-    
-    
 
                                         
